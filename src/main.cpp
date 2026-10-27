@@ -107,7 +107,10 @@ class $modify(ETEditorUI, EditorUI) {
         Tool tool = Tool::None;
         CCTouch* active = nullptr;
         CCDrawNode* preview = nullptr;
-        CCMenu* menu = nullptr;
+        CCMenu* menu = nullptr;      // always visible: the "Tools" toggle and the Done button
+        CCMenu* listMenu = nullptr;  // the drop-down list, hidden until opened
+        ButtonSprite* mainSpr = nullptr;
+        bool open = false;
         CCMenuItemSpriteExtra* doneBtn = nullptr;
         std::array<ButtonSprite*, 3> toolSprites{nullptr, nullptr, nullptr};
         std::vector<CCPoint> pts;
@@ -134,42 +137,75 @@ class $modify(ETEditorUI, EditorUI) {
         float y = static_cast<float>(getI("menu-y"));
         float const step = 26.f;
 
+        // One small "Tools" button is all that is on screen by default.
+        f->mainSpr = ButtonSprite::create("Tools", 62, true, "bigFont.fnt", "GJ_button_04.png", 22.f, .5f);
+        auto mainBtn = CCMenuItemExt::createSpriteExtra(f->mainSpr, [this](CCMenuItemSpriteExtra*) {
+            this->etSetOpen(!m_fields->open);
+        });
+        mainBtn->setPosition(ccp(x, y));
+        f->menu->addChild(mainBtn);
+
+        // The list drops down under it and is hidden again after picking something.
+        f->listMenu = CCMenu::create();
+        f->listMenu->setPosition(ccp(0, 0));
+        f->listMenu->setVisible(false);
+        this->addChild(f->listMenu, 100);
+
         auto addToolBtn = [&](char const* text, Tool tool, int slot, float yy) {
             auto spr = ButtonSprite::create(text, 62, true, "bigFont.fnt", "GJ_button_04.png", 22.f, .5f);
             f->toolSprites[slot] = spr;
             auto btn = CCMenuItemExt::createSpriteExtra(spr, [this, tool](CCMenuItemSpriteExtra*) {
+                this->etSetOpen(false);
                 this->etSetTool(tool);
             });
             btn->setPosition(ccp(x, yy));
-            f->menu->addChild(btn);
+            f->listMenu->addChild(btn);
         };
-        addToolBtn("Scatter", Tool::Scatter, 0, y);
-        addToolBtn("Polygon", Tool::Polygon, 1, y - step);
-        addToolBtn("Lasso", Tool::Lasso, 2, y - step * 2);
+        addToolBtn("Scatter", Tool::Scatter, 0, y - step);
+        addToolBtn("Polygon", Tool::Polygon, 1, y - step * 2);
+        addToolBtn("Lasso", Tool::Lasso, 2, y - step * 3);
 
         auto shotSpr = ButtonSprite::create("Shot", 62, true, "bigFont.fnt", "GJ_button_04.png", 22.f, .5f);
         auto shotBtn = CCMenuItemExt::createSpriteExtra(shotSpr, [this](CCMenuItemSpriteExtra*) {
+            this->etSetOpen(false);
             this->etScreenshot();
         });
-        shotBtn->setPosition(ccp(x, y - step * 3));
-        f->menu->addChild(shotBtn);
+        shotBtn->setPosition(ccp(x, y - step * 4));
+        f->listMenu->addChild(shotBtn);
 
         auto artSpr = ButtonSprite::create("Art AI", 62, true, "bigFont.fnt", "GJ_button_04.png", 22.f, .5f);
         auto artBtn = CCMenuItemExt::createSpriteExtra(artSpr, [this](CCMenuItemSpriteExtra*) {
+            this->etSetOpen(false);
             artOpenPopup(this);
         });
-        artBtn->setPosition(ccp(x, y - step * 4));
-        f->menu->addChild(artBtn);
+        artBtn->setPosition(ccp(x, y - step * 5));
+        f->listMenu->addChild(artBtn);
 
+        // "Done" for the polygon tool sits next to the Tools button, only while it is needed.
         auto doneSpr = ButtonSprite::create("Done", 62, true, "bigFont.fnt", "GJ_button_01.png", 22.f, .5f);
         f->doneBtn = CCMenuItemExt::createSpriteExtra(doneSpr, [this](CCMenuItemSpriteExtra*) {
             this->etFinishPolygon();
         });
-        f->doneBtn->setPosition(ccp(x, y - step * 5));
+        f->doneBtn->setPosition(ccp(x + 68.f, y));
         f->doneBtn->setVisible(false);
         f->menu->addChild(f->doneBtn);
 
         return true;
+    }
+
+    void etSetOpen(bool open) {
+        auto f = m_fields.self();
+        f->open = open;
+        f->listMenu->setVisible(open);
+        this->etRefreshMain();
+    }
+
+    // The Tools button is blue while open, green while a tool is active, gray otherwise.
+    void etRefreshMain() {
+        auto f = m_fields.self();
+        char const* bg = f->open ? "GJ_button_02.png"
+                                 : (f->tool != Tool::None ? "GJ_button_01.png" : "GJ_button_04.png");
+        f->mainSpr->updateBGImage(bg);
     }
 
     // ---- tool state -------------------------------------------------------------------------
@@ -188,6 +224,7 @@ class $modify(ETEditorUI, EditorUI) {
             }
         }
         f->doneBtn->setVisible(f->tool == Tool::Polygon);
+        this->etRefreshMain();
 
         switch (f->tool) {
             case Tool::Scatter: notify("Scatter Brush: select an object, then drag"); break;

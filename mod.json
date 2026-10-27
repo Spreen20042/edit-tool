@@ -4,7 +4,7 @@
 		"win": "2.2081",
 		"android": "2.2081"
 	},
-	"version": "v0.2.0",
+	"version": "v0.3.0",
 	"id": "spreen20042.editortools",
 	"name": "Editor Tools",
 	"developer": "Spreen20042",
@@ -130,12 +130,13 @@
 		},
 		"art-backend": {
 			"type": "string",
-			"name": "Art AI: Backend",
-			"description": "Pollinations = free image generator, no account or key. Gemini = free tier of Google's AI, needs your own free API key (get it at aistudio.google.com).",
-			"default": "Pollinations (no key)",
+			"name": "Art AI: Service",
+			"description": "Gemini = Google's free tier (best for drawing). OpenAI-compatible = Groq, OpenRouter, Cerebras, Mistral... (set URL/key/model below). Pollinations = image generator, very limited now.",
+			"default": "Gemini (free key)",
 			"one-of": [
-				"Pollinations (no key)",
-				"Gemini (free key)"
+				"Gemini (free key)",
+				"OpenAI-compatible (Groq, OpenRouter...)",
+				"Pollinations (limited, image)"
 			]
 		},
 		"art-gemini-key": {
@@ -150,12 +151,31 @@
 			"description": "Model name used with Gemini. Change it if Google renames or retires this one.",
 			"default": "gemini-2.5-flash"
 		},
+		"art-openai-url": {
+			"type": "string",
+			"name": "Art AI: Service URL",
+			"description": "Base URL of an OpenAI-compatible service. Groq: https://api.groq.com/openai/v1 - OpenRouter: https://openrouter.ai/api/v1 - Cerebras: https://api.cerebras.ai/v1",
+			"default": "https://api.groq.com/openai/v1"
+		},
+		"art-openai-key": {
+			"type": "string",
+			"name": "Art AI: Service API Key",
+			"description": "Your free API key for that service. Stays on your computer.",
+			"default": ""
+		},
+		"art-openai-model": {
+			"type": "string",
+			"name": "Art AI: Service Model",
+			"description": "Model name. Groq: openai/gpt-oss-120b - OpenRouter: pick one ending in :free. Bigger models draw better.",
+			"default": "openai/gpt-oss-120b"
+		},
 		"art-mode": {
 			"type": "string",
 			"name": "Art AI: Mode",
-			"description": "Recolor = each selected block gets a color from the art. New blocks = fills the selected area with small blocks (finer detail).",
-			"default": "Recolor selected blocks",
+			"description": "Shapes as real blocks = the AI's drawing becomes stretched blocks (crisp, few objects; needs Gemini or OpenAI-compatible). Recolor = selected blocks get colors. New blocks = pixel grid of small blocks.",
+			"default": "Shapes as real blocks",
 			"one-of": [
+				"Shapes as real blocks",
 				"Recolor selected blocks",
 				"Draw new blocks in area"
 			]
