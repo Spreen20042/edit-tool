@@ -16,21 +16,29 @@ The tools live in a drop-down: press **Tools** to open the list, pick one, and i
 
 ### Art AI (free)
 
-No payments and no server of ours: it talks to free third-party AI services directly from your game.
-You need a free API key (no credit card) from one of these:
+Works like a professional art agent, with free services only:
 
-| Service | Where | Notes |
-|---------|-------|-------|
-| **Gemini** | <https://aistudio.google.com> | Free tier on Flash models. Best for drawing. Google may use free-tier prompts for training outside the EU/UK. |
-| **Groq** | <https://console.groq.com> | Fast, ~1000 requests/day free. Model `openai/gpt-oss-120b`. |
-| **OpenRouter** | <https://openrouter.ai> | Models ending in `:free`, ~50 requests/day free. |
-| **Cerebras / Mistral** | their sites | Also OpenAI-compatible, free tiers. |
+1. **Shape** - reads the silhouette of the blocks you selected.
+2. **Plan** - an AI (optional) turns your prompt into a detailed drawing brief.
+3. **Drawing** - a free image model paints the picture.
+4. **Trace** - it is reduced to a few colors and merged into as few blocks as possible.
+5. **Place** - real blocks with their own color channels, clipped to your selection's shape.
 
-Choose the service in the mod settings. For anything except Gemini use **OpenAI-compatible** and fill
-*Service URL*, *API Key* and *Model*. Bigger models draw better.
+The new blocks stay selected after drawing: press Delete to remove the whole drawing in one go.
+Build the structure from **filled blocks** (not thin lines) for the best result.
 
-**Modes:** *Shapes as real blocks* (default) turns the AI's drawing into stretched blocks: crisp and few
-objects. *Recolor selected blocks* and *Draw new blocks in area* use a pixel grid instead.
+You need a free account/key (no credit card). Set it up once in the mod settings:
+
+| Service | What it does | Where |
+|---------|--------------|-------|
+| **Cloudflare FLUX** (default) | Best free *image* generator, ~100-170 images/day. Needs *Account ID* + *API token*: dashboard > AI > Workers AI > Use REST API. | <https://dash.cloudflare.com> |
+| **Gemini** | Free language model; also used to plan prompts. | <https://aistudio.google.com> |
+| **Groq / OpenRouter / Cerebras** | Free language models via *OpenAI-compatible*: fill URL, key, model. | <https://console.groq.com>, <https://openrouter.ai> |
+
+Tip: put a Cloudflare token (drawing) **and** a Gemini or Groq key (planning) for the best results.
+
+**Modes:** *Smart blocks (merged)* is the default and the best. *Shapes as real blocks* uses vector shapes drawn by Gemini/Groq.
+*Recolor selected blocks* only changes colors. Settings let you pick detail (cell size), number of colors, block limit and overhang.
 Free services have limits and can change; your prompt is sent to the service you choose.
 
 Tap a tool again to turn it off. If nothing is selected, tools use the basic block (ID 1).

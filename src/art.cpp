@@ -1,11 +1,14 @@
-// Art Agent: paints your selection with AI-generated art using free services only.
+// Art Agent: decorates your selection with AI art, using free services only.
 //
-//  * "Gemini (free key)" and "OpenAI-compatible" (Groq, OpenRouter, ...): a language model
-//    draws the art as simple vector shapes. They become real stretched blocks, or are
-//    rasterized to a pixel grid for the recolor modes.
-//  * "Pollinations": downloads a generated image and samples it (now heavily limited).
-//
-// Each color of the result becomes a color channel in the level.
+// The pipeline mirrors a professional art agent:
+//   1. Shape   - reads the silhouette of the selected blocks.
+//   2. Plan    - (optional) a language model turns your prompt into a detailed drawing brief.
+//   3. Drawing - an image model (Cloudflare FLUX, free) or a language model that draws
+//                vector shapes (Gemini / Groq / OpenRouter, free) makes the picture.
+//   4. Trace   - the picture is reduced to a small palette and merged into as few
+//                rectangles as possible.
+//   5. Place   - the rectangles become real blocks with their own color channels,
+//                clipped to the shape of your selection.
 
 #include "art.hpp"
 
@@ -31,6 +34,7 @@ namespace {
 
     double getF(char const* key) { return Mod::get()->getSettingValue<double>(key); }
     int64_t getI(char const* key) { return Mod::get()->getSettingValue<int64_t>(key); }
+    bool getB(char const* key) { return Mod::get()->getSettingValue<bool>(key); }
     std::string getS(char const* key) { return Mod::get()->getSettingValue<std::string>(key); }
 
     void notify(std::string const& text, NotificationIcon icon = NotificationIcon::Info) {
@@ -39,7 +43,7 @@ namespace {
 
     // ---- data -------------------------------------------------------------------------------
 
-    // One shape of the AI's drawing, in canvas units (canvas is 100 wide, y grows downward).
+    // One shape of a language model's drawing, in canvas units (100 wide, y grows downward).
     struct Shape {
         int type = 0; // 0 rect, 1 ellipse, 2 polygon
         float a = 0, b = 0, c = 0, d = 0;
@@ -48,20 +52,22 @@ namespace {
     };
 
     struct Job {
-        std::vector<Shape> shapes;   // only filled by the AI-shapes backends
+        std::vector<Shape> shapes;     // only filled by the language-model drawing backends
         Ref<EditorUI> ui;
         Ref<LevelEditorLayer> lel;
         std::string prompt;
         std::vector<Ref<GameObject>> objs;
-        CCRect area;       // bounding box of the selection, level units
-        int gw = 0;        // art canvas size in cells
+        std::vector<CCRect> rects;     // area covered by the selection (plus overhang)
+        CCRect area;                   // bounding box of the selection, level units
+        int gw = 0;                    // canvas size in cells
         int gh = 0;
-        float cellW = 15.f;
-        float cellH = 15.f;
+        float cellW = 7.5f;
+        float cellH = 7.5f;
         std::vector<ccColor3B> canvas; // gw * gh, row 0 = top
     };
 
     geode::async::TaskHolder<web::WebResponse> s_task;
+    geode::async::TaskHolder<web::WebResponse> s_planTask;
     bool s_busy = false;
 
     // ---- small helpers ----------------------------------------------------------------------
@@ -79,6 +85,37 @@ namespace {
             }
         }
         return out;
+    }
+
+    std::vector<uint8_t> base64Decode(std::string const& in) {
+        std::vector<uint8_t> out;
+        out.reserve(in.size() * 3 / 4);
+        uint32_t buf = 0;
+        int bits = 0;
+        for (unsigned char c : in) {
+            int v;
+            if (c >= 'A' && c <= 'Z') v = c - 'A';
+            else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+            else if (c >= '0' && c <= '9') v = c - '0' + 52;
+            else if (c == '+' || c == '-') v = 62;
+            else if (c == '/' || c == '_') v = 63;
+            else continue; // padding, newlines
+            buf = (buf << 6) | static_cast<uint32_t>(v);
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF));
+            }
+        }
+        return out;
+    }
+
+    std::string trim(std::string s) {
+        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+        return s;
     }
 
     bool parseHex(std::string const& s, ccColor3B& out) {
@@ -160,7 +197,34 @@ namespace {
         return assign;
     }
 
-    // ---- turning a canvas into level changes ------------------------------------------------
+    // ---- the selection's shape --------------------------------------------------------------
+
+    bool insideSelection(Job const& job, float x, float y) {
+        for (auto const& r : job.rects) {
+            if (r.containsPoint(ccp(x, y))) return true;
+        }
+        return false;
+    }
+
+    // A small text picture of the silhouette ('#' = solid) that is shown to the language models.
+    std::string silhouette(Job const& job) {
+        int cols = std::min(job.gw, 40);
+        int rows = std::clamp(
+            static_cast<int>(std::round(cols * (job.area.size.height / job.area.size.width) * 0.5f)), 2, 20
+        );
+        std::string out;
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                float x = job.area.origin.x + (c + 0.5f) / cols * job.area.size.width;
+                float y = job.area.origin.y + job.area.size.height - (r + 0.5f) / rows * job.area.size.height;
+                out += insideSelection(job, x, y) ? '#' : '.';
+            }
+            out += '\n';
+        }
+        return out;
+    }
+
+    // ---- placing things in the level --------------------------------------------------------
 
     void defineChannel(LevelEditorLayer* lel, int id, ccColor3B color) {
         GJEffectManager* managers[2] = {
@@ -175,6 +239,13 @@ namespace {
         }
     }
 
+    void setObjectChannel(GameObject* obj, int channel) {
+        if (auto c = obj->m_baseColor) {
+            c->m_colorID = channel;
+            c->m_defaultColorID = channel;
+        }
+    }
+
     ccColor3B sampleCanvas(Job const& job, float x, float y) {
         int i = static_cast<int>(std::floor((x - job.area.origin.x) / job.cellW));
         int j = static_cast<int>(std::floor((job.area.origin.y + job.area.size.height - y) / job.cellH));
@@ -183,16 +254,135 @@ namespace {
         return job.canvas[static_cast<size_t>(j) * job.gw + i];
     }
 
-    void setObjectChannel(GameObject* obj, int channel) {
-        if (auto c = obj->m_baseColor) {
-            c->m_colorID = channel;
-            c->m_defaultColorID = channel;
-        }
+    // Creates one stretched basic block with a color channel.
+    GameObject* makeBlock(Job& job, CCPoint center, float w, float h, int channel) {
+        auto obj = job.lel->createObject(1, center, false);
+        if (!obj) return nullptr;
+        obj->updateCustomScaleX(std::max(0.02f, w / kBlock));
+        obj->updateCustomScaleY(std::max(0.02f, h / kBlock));
+        setObjectChannel(obj, channel);
+        return obj;
     }
 
-    // "Shapes as real blocks": every shape the AI drew becomes real, stretched blocks.
-    // Rectangles are a single block; ellipses and polygons are built from horizontal strips,
-    // so the result has crisp edges and far fewer objects than a pixel grid.
+    // ---- placement mode 1: smart blocks (image trace) ---------------------------------------
+
+    void applySmart(std::shared_ptr<Job> job) {
+        int firstChannel = static_cast<int>(getI("art-first-channel"));
+        int maxColors = static_cast<int>(getI("art-colors"));
+        int maxObjects = static_cast<int>(getI("max-objects"));
+        bool clip = getB("art-clip");
+        int gw = job->gw, gh = job->gh;
+        float top = job->area.origin.y + job->area.size.height;
+
+        // Cells that belong to the art, with their colors.
+        std::vector<int> cellToColor(static_cast<size_t>(gw) * gh, -1);
+        std::vector<ccColor3B> cols;
+        for (int j = 0; j < gh; ++j) {
+            for (int i = 0; i < gw; ++i) {
+                float x = job->area.origin.x + (i + 0.5f) * job->cellW;
+                float y = top - (j + 0.5f) * job->cellH;
+                if (clip && !insideSelection(*job, x, y)) continue;
+                cellToColor[static_cast<size_t>(j) * gw + i] = static_cast<int>(cols.size());
+                cols.push_back(job->canvas[static_cast<size_t>(j) * gw + i]);
+            }
+        }
+        if (cols.empty()) {
+            notify("Nothing to paint inside the selection", NotificationIcon::Warning);
+            return;
+        }
+
+        std::vector<ccColor3B> palette;
+        auto assign = quantize(cols, maxColors, palette);
+
+        std::vector<int> label(static_cast<size_t>(gw) * gh, -1);
+        for (size_t c = 0; c < label.size(); ++c) {
+            if (cellToColor[c] >= 0) label[c] = assign[cellToColor[c]];
+        }
+
+        // Greedy rectangle merging: same-color neighbours become one big block.
+        struct Rect { int i0, j0, i1, j1, color; };
+        std::vector<Rect> rects;
+        std::vector<char> used(label.size(), 0);
+        for (int j = 0; j < gh; ++j) {
+            for (int i = 0; i < gw; ++i) {
+                size_t idx = static_cast<size_t>(j) * gw + i;
+                if (used[idx] || label[idx] < 0) continue;
+                int c = label[idx];
+                int i1 = i;
+                while (i1 + 1 < gw && !used[idx + (i1 + 1 - i)] && label[idx + (i1 + 1 - i)] == c) i1++;
+                int j1 = j;
+                bool grow = true;
+                while (grow && j1 + 1 < gh) {
+                    for (int k = i; k <= i1; ++k) {
+                        size_t n = static_cast<size_t>(j1 + 1) * gw + k;
+                        if (used[n] || label[n] != c) { grow = false; break; }
+                    }
+                    if (grow) j1++;
+                }
+                for (int jj = j; jj <= j1; ++jj) {
+                    for (int ii = i; ii <= i1; ++ii) used[static_cast<size_t>(jj) * gw + ii] = 1;
+                }
+                rects.push_back({i, j, i1, j1, c});
+            }
+        }
+
+        if (static_cast<int>(rects.size()) > maxObjects) {
+            notify(fmt::format("The art needs {} blocks (limit {}). Raise Art Cell Size or lower Art Colors.",
+                               rects.size(), maxObjects),
+                   NotificationIcon::Warning);
+            return;
+        }
+
+        for (size_t c = 0; c < palette.size(); ++c) {
+            defineChannel(job->lel, firstChannel + static_cast<int>(c), palette[c]);
+        }
+
+        auto placed = CCArray::create();
+        for (auto const& r : rects) {
+            float w = (r.i1 - r.i0 + 1) * job->cellW;
+            float h = (r.j1 - r.j0 + 1) * job->cellH;
+            CCPoint center = ccp(job->area.origin.x + (r.i0 + r.i1 + 1) * 0.5f * job->cellW,
+                                 top - (r.j0 + r.j1 + 1) * 0.5f * job->cellH);
+            if (auto obj = makeBlock(*job, center, w, h, firstChannel + r.color)) placed->addObject(obj);
+        }
+        job->lel->updateObjectColors(placed);
+        // The new blocks stay selected: press Delete to remove the whole drawing, or move it as one piece.
+        job->ui->selectObjects(placed, true);
+
+        notify(fmt::format("Art done: {} blocks, {} colors (channels {}-{})", rects.size(), palette.size(),
+                           firstChannel, firstChannel + static_cast<int>(palette.size()) - 1),
+               NotificationIcon::Success);
+    }
+
+    // ---- placement mode 2: recolor the selected blocks --------------------------------------
+
+    void applyRecolor(std::shared_ptr<Job> job) {
+        int firstChannel = static_cast<int>(getI("art-first-channel"));
+        int maxColors = static_cast<int>(getI("art-colors"));
+
+        std::vector<ccColor3B> cols;
+        for (auto const& o : job->objs) cols.push_back(sampleCanvas(*job, o->getPositionX(), o->getPositionY()));
+        if (cols.empty()) return;
+
+        std::vector<ccColor3B> palette;
+        auto assign = quantize(cols, maxColors, palette);
+        for (size_t c = 0; c < palette.size(); ++c) {
+            defineChannel(job->lel, firstChannel + static_cast<int>(c), palette[c]);
+        }
+
+        auto changed = CCArray::create();
+        for (size_t i = 0; i < job->objs.size(); ++i) {
+            setObjectChannel(job->objs[i], firstChannel + assign[i]);
+            changed->addObject(job->objs[i]);
+        }
+        job->lel->updateObjectColors(changed);
+        notify(fmt::format("Art done: {} colors, channels {}-{}", palette.size(), firstChannel,
+                           firstChannel + static_cast<int>(palette.size()) - 1),
+               NotificationIcon::Success);
+    }
+
+    // ---- placement mode 3: the model's vector shapes as stretched blocks --------------------
+
     void applyShapes(std::shared_ptr<Job> job) {
         int firstChannel = static_cast<int>(getI("art-first-channel"));
         int maxColors = static_cast<int>(getI("art-colors"));
@@ -225,16 +415,11 @@ namespace {
             y0 = std::max(0.f, y0); y1 = std::min(canvasH, y1);
             if (x1 - x0 < 0.05f || y1 - y0 < 0.05f) return;
             if (placed >= maxObjects) { limitHit = true; return; }
-            float w = (x1 - x0) * sxU;
-            float h = (y1 - y0) * syU;
             CCPoint center = ccp(left + (x0 + x1) * 0.5f * sxU, top - (y0 + y1) * 0.5f * syU);
-            auto obj = job->lel->createObject(1, center, false);
-            if (!obj) return;
-            obj->updateCustomScaleX(std::max(0.02f, w / kBlock));
-            obj->updateCustomScaleY(std::max(0.02f, h / kBlock));
-            setObjectChannel(obj, channel);
-            changed->addObject(obj);
-            placed++;
+            if (auto obj = makeBlock(*job, center, (x1 - x0) * sxU, (y1 - y0) * syU, channel)) {
+                changed->addObject(obj);
+                placed++;
+            }
         };
 
         for (size_t si = 0; si < job->shapes.size(); ++si) {
@@ -285,6 +470,7 @@ namespace {
         }
 
         job->lel->updateObjectColors(changed);
+        job->ui->selectObjects(changed, true);
         if (limitHit) notify("Object limit reached, the drawing is incomplete", NotificationIcon::Warning);
         notify(fmt::format("Art done: {} blocks, {} colors (channels {}-{})", placed, palette.size(),
                            firstChannel, firstChannel + static_cast<int>(palette.size()) - 1),
@@ -296,86 +482,14 @@ namespace {
             notify("The editor was closed, art discarded", NotificationIcon::Warning);
             return;
         }
-
         std::string mode = getS("art-mode");
-        if (mode == "Shapes as real blocks" && !job->shapes.empty()) {
+        if (mode == "Recolor selected blocks") {
+            applyRecolor(job);
+        } else if (mode == "Shapes as real blocks" && !job->shapes.empty()) {
             applyShapes(job);
-            return;
-        }
-
-        int firstChannel = static_cast<int>(getI("art-first-channel"));
-        int maxColors = static_cast<int>(getI("art-colors"));
-        // Backends without shapes (images) can't do "Shapes as real blocks": use fine new blocks instead.
-        bool newBlocks = mode == "Draw new blocks in area" || mode == "Shapes as real blocks";
-        int maxObjects = static_cast<int>(getI("max-objects"));
-
-        // Gather the colors we need to reduce.
-        std::vector<ccColor3B> cols;
-        std::vector<CCPoint> centers; // level position for each entry in `cols`
-
-        if (newBlocks) {
-            // Cells whose center lies inside any selected object.
-            for (int j = 0; j < job->gh; ++j) {
-                for (int i = 0; i < job->gw; ++i) {
-                    float x = job->area.origin.x + (i + 0.5f) * job->cellW;
-                    float y = job->area.origin.y + job->area.size.height - (j + 0.5f) * job->cellH;
-                    bool inside = false;
-                    for (auto const& o : job->objs) {
-                        auto r = o->getObjectRect();
-                        if (r.size.width < 1.f) r = CCRect(o->getPositionX() - 15, o->getPositionY() - 15, 30, 30);
-                        if (r.containsPoint(ccp(x, y))) { inside = true; break; }
-                    }
-                    if (!inside) continue;
-                    centers.push_back(ccp(x, y));
-                    cols.push_back(job->canvas[static_cast<size_t>(j) * job->gw + i]);
-                }
-            }
         } else {
-            for (auto const& o : job->objs) {
-                centers.push_back(o->getPosition());
-                cols.push_back(sampleCanvas(*job, o->getPositionX(), o->getPositionY()));
-            }
+            applySmart(job); // default, and the only option for image backends
         }
-
-        if (cols.empty()) {
-            notify("Nothing to paint", NotificationIcon::Warning);
-            return;
-        }
-        if (newBlocks && static_cast<int>(cols.size()) > maxObjects) {
-            notify("Too many cells, raise Art Cell Size or the object limit", NotificationIcon::Warning);
-            return;
-        }
-
-        std::vector<ccColor3B> palette;
-        auto assign = quantize(cols, maxColors, palette);
-
-        for (size_t c = 0; c < palette.size(); ++c) {
-            defineChannel(job->lel, firstChannel + static_cast<int>(c), palette[c]);
-        }
-
-        auto changed = CCArray::create();
-        if (newBlocks) {
-            float sx = job->cellW / kBlock;
-            float sy = job->cellH / kBlock;
-            for (size_t i = 0; i < centers.size(); ++i) {
-                auto obj = job->lel->createObject(1, centers[i], false);
-                if (!obj) continue;
-                if (std::abs(sx - 1.f) > 0.001f) obj->updateCustomScaleX(sx);
-                if (std::abs(sy - 1.f) > 0.001f) obj->updateCustomScaleY(sy);
-                setObjectChannel(obj, firstChannel + assign[i]);
-                changed->addObject(obj);
-            }
-        } else {
-            for (size_t i = 0; i < job->objs.size(); ++i) {
-                setObjectChannel(job->objs[i], firstChannel + assign[i]);
-                changed->addObject(job->objs[i]);
-            }
-        }
-        job->lel->updateObjectColors(changed);
-
-        notify(fmt::format("Art done: {} colors, channels {}-{}", palette.size(), firstChannel,
-                           firstChannel + static_cast<int>(palette.size()) - 1),
-               NotificationIcon::Success);
     }
 
     void finish(std::shared_ptr<Job> job, bool ok, std::string const& error = "") {
@@ -387,82 +501,117 @@ namespace {
         applyCanvas(job);
     }
 
-    // ---- backend 1: Pollinations (image -> canvas) -----------------------------------------
-
-    void onImage(std::shared_ptr<Job> job, web::WebResponse res) {
-        if (!res.ok()) return finish(job, false, fmt::format("server answered {}", res.code()));
-
-        auto const& data = res.data();
-        auto img = new CCImage();
-        if (!img->initWithImageData(const_cast<uint8_t*>(data.data()), static_cast<int>(data.size()))) {
-            img->release();
-            return finish(job, false, "could not read the image (unsupported format)");
+    std::string httpWhy(web::WebResponse const& res, char const* what) {
+        std::string why = fmt::format("server answered {}", res.code());
+        if (res.code() == 400 || res.code() == 401 || res.code() == 403) {
+            why += fmt::format(" (check your {})", what);
+        } else if (res.code() == 404) {
+            why += " (check the URL, account ID and model name)";
+        } else if (res.code() == 429) {
+            why += " (free quota reached, try later or switch service)";
         }
-
-        int W = static_cast<int>(img->getWidth());
-        int H = static_cast<int>(img->getHeight());
-        unsigned char* px = img->getData();
-        int stride = img->hasAlpha() ? 4 : 3;
-        if (!px || W < 2 || H < 2) {
-            img->release();
-            return finish(job, false, "empty image");
-        }
-
-        job->canvas.assign(static_cast<size_t>(job->gw) * job->gh, ccColor3B{0, 0, 0});
-        for (int j = 0; j < job->gh; ++j) {
-            for (int i = 0; i < job->gw; ++i) {
-                int x0 = i * W / job->gw, x1 = std::max(x0 + 1, (i + 1) * W / job->gw);
-                int y0 = j * H / job->gh, y1 = std::max(y0 + 1, (j + 1) * H / job->gh);
-                double r = 0, g = 0, b = 0;
-                int n = 0;
-                for (int y = y0; y < y1 && y < H; ++y) {
-                    for (int x = x0; x < x1 && x < W; ++x) {
-                        unsigned char* p = px + (static_cast<size_t>(y) * W + x) * stride;
-                        r += p[0]; g += p[1]; b += p[2]; n++;
-                    }
-                }
-                if (n == 0) n = 1;
-                job->canvas[static_cast<size_t>(j) * job->gw + i] =
-                    ccColor3B{static_cast<GLubyte>(r / n), static_cast<GLubyte>(g / n), static_cast<GLubyte>(b / n)};
-            }
-        }
-        img->release();
-        finish(job, true);
+        return why;
     }
 
-    void startPollinations(std::shared_ptr<Job> job) {
-        // Ask for an image with the same aspect ratio as the selected area.
-        float aspect = job->area.size.height / std::max(1.f, job->area.size.width);
-        int w = 512;
-        int h = std::clamp(static_cast<int>(512.f * aspect), 128, 1024);
+    // ---- language models (Gemini / OpenAI-compatible) ---------------------------------------
 
-        std::string full = job->prompt +
-            ", flat vector illustration, simple bold shapes, solid colors, centered, no text, no watermark";
-        std::string url = fmt::format(
-            "https://image.pollinations.ai/prompt/{}?width={}&height={}&nologo=true&seed={}",
-            urlEncode(full), w, h, static_cast<int>(std::time(nullptr) % 100000)
-        );
+    using LLMCb = std::function<void(bool, std::string)>;
 
-        s_task.spawn(
-            web::WebRequest().userAgent("GeodeEditorTools/0.3").timeout(std::chrono::seconds(90)).get(url),
-            [job](web::WebResponse res) { onImage(job, std::move(res)); }
-        );
+    // Sends one prompt and calls back with (ok, answer-or-error). `which` is "gemini" or "openai".
+    void askLLM(geode::async::TaskHolder<web::WebResponse>& holder, std::string const& which,
+                std::string const& instruction, bool wantJson, LLMCb cb) {
+        web::WebRequest req;
+        req.userAgent("GeodeEditorTools/0.4");
+        req.timeout(std::chrono::seconds(120));
+        req.header("Content-Type", "application/json");
+
+        if (which == "gemini") {
+            std::string key = getS("art-gemini-key");
+            if (key.empty()) return cb(false, "paste your free Gemini API key in the mod settings");
+            std::string model = getS("art-gemini-model");
+            if (model.empty()) model = "gemini-2.5-flash";
+
+            std::string gen = wantJson ? "{\"responseMimeType\":\"application/json\",\"temperature\":0.9}"
+                                       : "{\"temperature\":0.8}";
+            req.header("x-goog-api-key", key);
+            req.bodyString(fmt::format(
+                "{{\"contents\":[{{\"parts\":[{{\"text\":{}}}]}}],\"generationConfig\":{}}}",
+                matjson::Value(instruction).dump(0), gen
+            ));
+            std::string url = fmt::format(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model
+            );
+            holder.spawn(req.post(url), [cb](web::WebResponse res) {
+                if (!res.ok()) return cb(false, httpWhy(res, "Gemini API key"));
+                auto js = res.json();
+                if (!js) return cb(false, "bad response from Gemini");
+                auto root = std::move(js).unwrap();
+                auto& cands = root["candidates"];
+                if (!cands.isArray() || cands.size() == 0) return cb(false, "Gemini returned no answer");
+                auto& parts = cands[0]["content"]["parts"];
+                if (!parts.isArray() || parts.size() == 0) return cb(false, "Gemini returned an empty answer");
+                cb(true, parts[0]["text"].asString().unwrapOr(""));
+            });
+            return;
+        }
+
+        // OpenAI-compatible: Groq, OpenRouter, Cerebras, Mistral, Together, ...
+        std::string base = getS("art-openai-url");
+        std::string key = getS("art-openai-key");
+        std::string model = getS("art-openai-model");
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        if (base.empty() || model.empty()) {
+            return cb(false, "set the URL and model of the AI service in the mod settings");
+        }
+        if (key.empty()) return cb(false, "paste your free API key for this service in the mod settings");
+
+        req.header("Authorization", "Bearer " + key);
+        req.bodyString(fmt::format(
+            "{{\"model\":{},\"temperature\":0.9,\"messages\":[{{\"role\":\"user\",\"content\":{}}}]}}",
+            matjson::Value(model).dump(0), matjson::Value(instruction).dump(0)
+        ));
+        holder.spawn(req.post(base + "/chat/completions"), [cb](web::WebResponse res) {
+            if (!res.ok()) return cb(false, httpWhy(res, "API key and model"));
+            auto js = res.json();
+            if (!js) return cb(false, "bad response from the AI service");
+            auto root = std::move(js).unwrap();
+            auto& choices = root["choices"];
+            if (!choices.isArray() || choices.size() == 0) return cb(false, "the AI returned no answer");
+            cb(true, choices[0]["message"]["content"].asString().unwrapOr(""));
+        });
     }
 
-    // ---- backends 2 and 3: a language model draws shapes (Gemini / OpenAI-compatible) -------
+    // Which language model is available to plan prompts (empty = none configured).
+    std::string plannerLLM() {
+        std::string backend = getS("art-backend");
+        if (backend == "Gemini (free key)") return "gemini";
+        if (backend == "OpenAI-compatible (Groq, OpenRouter...)") return "openai";
+        if (!getS("art-gemini-key").empty()) return "gemini";
+        if (!getS("art-openai-key").empty()) return "openai";
+        return "";
+    }
 
-    std::string stripFences(std::string s) {
-        auto first = s.find('{');
-        auto last = s.rfind('}');
-        if (first == std::string::npos || last == std::string::npos || last < first) return s;
-        return s.substr(first, last - first + 1);
+    std::string planInstruction(Job const& job) {
+        return fmt::format(
+            "You write prompts for an image generator. The image will decorate a video game structure "
+            "with the silhouette below ('#' = solid, '.' = empty), aspect ratio about {:.1f}:1 (wide:tall).\n"
+            "{}\n"
+            "User request: \"{}\"\n"
+            "Write ONE detailed prompt in English, max 70 words, for a decorative game-art illustration "
+            "that fills the whole picture: materials, a limited palette of {} colors, lighting and small details. "
+            "Flat vector style, bold shapes, high contrast, plain simple background, no text, no frame. "
+            "Reply with only the prompt.",
+            job.area.size.width / std::max(1.f, job.area.size.height), silhouette(job), job.prompt,
+            getI("art-colors")
+        );
     }
 
     std::string shapesInstruction(Job const& job) {
         float canvasH = 100.f * static_cast<float>(job.gh) / static_cast<float>(job.gw);
         return fmt::format(
-            "You are an artist making flat vector art for a video game level. "
+            "You are an artist making flat vector decoration for a video game structure. "
             "Canvas: width 100, height {:.1f}, origin at the top-left, y grows downward. "
+            "The art will be clipped to this silhouette ('#' = solid, '.' = empty):\n{}\n"
             "Draw: \"{}\". "
             "Reply with ONLY a JSON object, no markdown, in this exact format: "
             "{{\"background\":\"#RRGGBB\",\"shapes\":[{{\"type\":\"rect\",\"x\":0,\"y\":0,\"w\":10,\"h\":10,\"color\":\"#RRGGBB\"}},"
@@ -471,12 +620,19 @@ namespace {
             "Shapes are painted in order, so put large background shapes first and details last. "
             "Compose it like a decorative piece: strong silhouette, a few large shapes plus small details, "
             "good contrast between neighbouring colors. "
-            "Use at most 50 shapes and at most {} distinct colors. Fill the whole canvas.",
-            canvasH, job.prompt, getI("art-colors")
+            "Use at most 60 shapes and at most {} distinct colors. Fill the whole canvas.",
+            canvasH, silhouette(job), job.prompt, getI("art-colors")
         );
     }
 
-    // Parses the model's JSON answer into job->shapes and rasterizes it for the pixel modes.
+    std::string stripFences(std::string s) {
+        auto first = s.find('{');
+        auto last = s.rfind('}');
+        if (first == std::string::npos || last == std::string::npos || last < first) return s;
+        return s.substr(first, last - first + 1);
+    }
+
+    // Parses the model's JSON answer into job->shapes and rasterizes it into the canvas.
     void onShapesText(std::shared_ptr<Job> job, std::string const& text, std::string const& who) {
         auto parsed = matjson::parse(stripFences(text));
         if (!parsed) return finish(job, false, who + " did not return valid JSON, try again");
@@ -488,7 +644,7 @@ namespace {
         std::vector<Shape> shapes;
         auto& list = art["shapes"];
         if (list.isArray()) {
-            for (size_t i = 0; i < list.size() && shapes.size() < 80; ++i) {
+            for (size_t i = 0; i < list.size() && shapes.size() < 100; ++i) {
                 auto& s = list[i];
                 Shape sh;
                 if (!parseHex(s["color"].asString().unwrapOr(""), sh.color)) continue;
@@ -553,98 +709,134 @@ namespace {
         finish(job, true);
     }
 
-    std::string httpWhy(web::WebResponse const& res, char const* keyName) {
-        std::string why = fmt::format("server answered {}", res.code());
-        if (res.code() == 400 || res.code() == 401 || res.code() == 403) {
-            why += fmt::format(" (check your {} and model name)", keyName);
-        } else if (res.code() == 404) {
-            why += " (check the URL and model name)";
-        } else if (res.code() == 429) {
-            why += " (free quota reached, try later or switch model)";
+    void startShapes(std::shared_ptr<Job> job, std::string const& which, std::string const& who) {
+        notify("Drawing...");
+        askLLM(s_task, which, shapesInstruction(*job), true, [job, who](bool ok, std::string text) {
+            if (!ok) return finish(job, false, text);
+            onShapesText(job, text, who);
+        });
+    }
+
+    // ---- image models (Cloudflare FLUX / Pollinations) --------------------------------------
+
+    // Decodes an image and samples it into the canvas (center-cropped to the selection's aspect).
+    // Returns an error message, or an empty string on success.
+    std::string canvasFromImageBytes(Job& job, uint8_t const* data, size_t size) {
+        if (!data || size < 16) return "empty image";
+        auto img = new CCImage();
+        if (!img->initWithImageData(const_cast<uint8_t*>(data), static_cast<int>(size))) {
+            img->release();
+            return "could not read the image (unsupported format)";
         }
-        return why;
-    }
 
-    void onGemini(std::shared_ptr<Job> job, web::WebResponse res) {
-        if (!res.ok()) return finish(job, false, httpWhy(res, "Gemini API key"));
-
-        auto js = res.json();
-        if (!js) return finish(job, false, "bad response from Gemini");
-        auto root = std::move(js).unwrap();
-
-        auto& cands = root["candidates"];
-        if (!cands.isArray() || cands.size() == 0) return finish(job, false, "Gemini returned no answer");
-        auto& parts = cands[0]["content"]["parts"];
-        if (!parts.isArray() || parts.size() == 0) return finish(job, false, "Gemini returned an empty answer");
-        onShapesText(job, parts[0]["text"].asString().unwrapOr(""), "Gemini");
-    }
-
-    void onOpenAI(std::shared_ptr<Job> job, web::WebResponse res) {
-        if (!res.ok()) return finish(job, false, httpWhy(res, "API key"));
-
-        auto js = res.json();
-        if (!js) return finish(job, false, "bad response from the AI service");
-        auto root = std::move(js).unwrap();
-
-        auto& choices = root["choices"];
-        if (!choices.isArray() || choices.size() == 0) return finish(job, false, "the AI returned no answer");
-        onShapesText(job, choices[0]["message"]["content"].asString().unwrapOr(""), "The AI");
-    }
-
-    void startGemini(std::shared_ptr<Job> job) {
-        std::string key = getS("art-gemini-key");
-        if (key.empty()) {
-            return finish(job, false, "paste your free Gemini API key in the mod settings");
+        int W = static_cast<int>(img->getWidth());
+        int H = static_cast<int>(img->getHeight());
+        unsigned char* px = img->getData();
+        int stride = img->hasAlpha() ? 4 : 3;
+        if (!px || W < 2 || H < 2) {
+            img->release();
+            return "empty image";
         }
-        std::string model = getS("art-gemini-model");
-        if (model.empty()) model = "gemini-2.5-flash";
 
-        std::string body = fmt::format(
-            "{{\"contents\":[{{\"parts\":[{{\"text\":{}}}]}}],"
-            "\"generationConfig\":{{\"responseMimeType\":\"application/json\",\"temperature\":0.9}}}}",
-            matjson::Value(shapesInstruction(*job)).dump(0)
-        );
+        // Crop the image to the same aspect ratio as the selection, so nothing is stretched.
+        float targetAspect = job.area.size.width / std::max(1.f, job.area.size.height);
+        float srcAspect = static_cast<float>(W) / static_cast<float>(H);
+        int cropW = W, cropH = H, cropX = 0, cropY = 0;
+        if (srcAspect > targetAspect) {
+            cropW = std::max(2, static_cast<int>(H * targetAspect));
+            cropX = (W - cropW) / 2;
+        } else {
+            cropH = std::max(2, static_cast<int>(W / targetAspect));
+            cropY = (H - cropH) / 2;
+        }
 
+        job.canvas.assign(static_cast<size_t>(job.gw) * job.gh, ccColor3B{0, 0, 0});
+        for (int j = 0; j < job.gh; ++j) {
+            for (int i = 0; i < job.gw; ++i) {
+                int x0 = cropX + i * cropW / job.gw;
+                int x1 = std::max(x0 + 1, cropX + (i + 1) * cropW / job.gw);
+                int y0 = cropY + j * cropH / job.gh;
+                int y1 = std::max(y0 + 1, cropY + (j + 1) * cropH / job.gh);
+                double r = 0, g = 0, b = 0;
+                int n = 0;
+                for (int y = y0; y < y1 && y < H; ++y) {
+                    for (int x = x0; x < x1 && x < W; ++x) {
+                        unsigned char* p = px + (static_cast<size_t>(y) * W + x) * stride;
+                        r += p[0]; g += p[1]; b += p[2]; n++;
+                    }
+                }
+                if (n == 0) n = 1;
+                job.canvas[static_cast<size_t>(j) * job.gw + i] =
+                    ccColor3B{static_cast<GLubyte>(r / n), static_cast<GLubyte>(g / n), static_cast<GLubyte>(b / n)};
+            }
+        }
+        img->release();
+        return "";
+    }
+
+    std::string imagePrompt(Job const& job) {
+        return job.prompt +
+            ", flat vector illustration, bold simple shapes, limited color palette, strong silhouette, "
+            "high contrast, decorative game art, plain simple background, no text, no frame";
+    }
+
+    void startCloudflare(std::shared_ptr<Job> job) {
+        std::string account = trim(getS("art-cf-account"));
+        std::string token = trim(getS("art-cf-token"));
+        if (account.empty() || token.empty()) {
+            return finish(job, false, "paste your Cloudflare Account ID and API token in the mod settings");
+        }
+
+        notify("Drawing...");
         web::WebRequest req;
-        req.header("x-goog-api-key", key);
-        req.header("Content-Type", "application/json");
-        req.userAgent("GeodeEditorTools/0.3");
+        req.userAgent("GeodeEditorTools/0.4");
         req.timeout(std::chrono::seconds(120));
-        req.bodyString(body);
+        req.header("Authorization", "Bearer " + token);
+        req.header("Content-Type", "application/json");
+        req.bodyString(fmt::format("{{\"prompt\":{},\"steps\":6}}", matjson::Value(imagePrompt(*job)).dump(0)));
 
         std::string url = fmt::format(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", model
+            "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/@cf/black-forest-labs/flux-1-schnell", account
         );
-        s_task.spawn(req.post(url), [job](web::WebResponse res) { onGemini(job, std::move(res)); });
+        s_task.spawn(req.post(url), [job](web::WebResponse res) {
+            if (!res.ok()) return finish(job, false, httpWhy(res, "Cloudflare Account ID and API token"));
+            auto js = res.json();
+            if (!js) return finish(job, false, "bad response from Cloudflare");
+            auto root = std::move(js).unwrap();
+            if (!root.isObject() || !root.contains("result")) {
+                return finish(job, false, "Cloudflare returned no image");
+            }
+            std::string b64 = root["result"]["image"].asString().unwrapOr("");
+            if (b64.empty()) return finish(job, false, "Cloudflare returned no image");
+
+            notify("Tracing...");
+            auto bytes = base64Decode(b64);
+            auto err = canvasFromImageBytes(*job, bytes.data(), bytes.size());
+            if (!err.empty()) return finish(job, false, err);
+            finish(job, true);
+        });
     }
 
-    // Works with any OpenAI-compatible service: Groq, OpenRouter, Cerebras, Mistral, Together, ...
-    void startOpenAI(std::shared_ptr<Job> job) {
-        std::string base = getS("art-openai-url");
-        std::string key = getS("art-openai-key");
-        std::string model = getS("art-openai-model");
-        while (!base.empty() && base.back() == '/') base.pop_back();
-        if (base.empty() || model.empty()) {
-            return finish(job, false, "set the URL and model of the AI service in the mod settings");
-        }
-        if (key.empty()) {
-            return finish(job, false, "paste your free API key for this service in the mod settings");
-        }
-
-        std::string body = fmt::format(
-            "{{\"model\":{},\"temperature\":0.9,\"messages\":[{{\"role\":\"user\",\"content\":{}}}]}}",
-            matjson::Value(model).dump(0), matjson::Value(shapesInstruction(*job)).dump(0)
+    void startPollinations(std::shared_ptr<Job> job) {
+        notify("Drawing...");
+        float aspect = job->area.size.height / std::max(1.f, job->area.size.width);
+        int w = 768;
+        int h = std::clamp(static_cast<int>(768.f * aspect), 192, 1024);
+        std::string url = fmt::format(
+            "https://image.pollinations.ai/prompt/{}?width={}&height={}&nologo=true&seed={}",
+            urlEncode(imagePrompt(*job)), w, h, static_cast<int>(std::time(nullptr) % 100000)
         );
-
-        web::WebRequest req;
-        req.header("Authorization", "Bearer " + key);
-        req.header("Content-Type", "application/json");
-        req.userAgent("GeodeEditorTools/0.3");
-        req.timeout(std::chrono::seconds(120));
-        req.bodyString(body);
-
-        s_task.spawn(req.post(base + "/chat/completions"),
-                     [job](web::WebResponse res) { onOpenAI(job, std::move(res)); });
+        s_task.spawn(
+            web::WebRequest().userAgent("GeodeEditorTools/0.4").timeout(std::chrono::seconds(120)).get(url),
+            [job](web::WebResponse res) {
+                if (!res.ok()) return finish(job, false, httpWhy(res, "connection (Pollinations now limits free use)"));
+                auto const& data = res.data();
+                notify("Tracing...");
+                auto err = canvasFromImageBytes(*job, data.data(), data.size());
+                if (!err.empty()) return finish(job, false, err);
+                finish(job, true);
+            }
+        );
     }
 
     // ---- entry ------------------------------------------------------------------------------
@@ -670,31 +862,50 @@ namespace {
         job->lel = ui->m_editorLayer;
         job->prompt = std::move(prompt);
 
+        // 1. Shape: the area covered by the selection, optionally with some overhang.
+        float overhang = static_cast<float>(getF("art-overhang"));
         float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
         for (auto obj : CCArrayExt<GameObject*>(sel)) {
             auto r = obj->getObjectRect();
             if (r.size.width < 1.f) r = CCRect(obj->getPositionX() - 15, obj->getPositionY() - 15, 30, 30);
+            r = CCRect(r.origin.x - overhang, r.origin.y - overhang,
+                       r.size.width + overhang * 2.f, r.size.height + overhang * 2.f);
+            job->rects.push_back(r);
             minX = std::min(minX, r.getMinX()); maxX = std::max(maxX, r.getMaxX());
             minY = std::min(minY, r.getMinY()); maxY = std::max(maxY, r.getMaxY());
             job->objs.push_back(obj);
         }
         job->area = CCRect(minX, minY, std::max(1.f, maxX - minX), std::max(1.f, maxY - minY));
 
-        float cell = static_cast<float>(getF("art-cell"));
-        job->gw = std::clamp(static_cast<int>(std::ceil(job->area.size.width / cell)), 4, 128);
-        job->gh = std::clamp(static_cast<int>(std::ceil(job->area.size.height / cell)), 4, 128);
+        float cell = std::max(3.75f, static_cast<float>(getF("art-cell")));
+        job->gw = std::clamp(static_cast<int>(std::ceil(job->area.size.width / cell)), 4, 192);
+        job->gh = std::clamp(static_cast<int>(std::ceil(job->area.size.height / cell)), 4, 192);
         job->cellW = job->area.size.width / job->gw;
         job->cellH = job->area.size.height / job->gh;
 
         s_busy = true;
-        notify("Art Agent: generating, this can take up to a minute...");
         std::string backend = getS("art-backend");
-        if (backend == "Gemini (free key)") {
-            startGemini(job);
-        } else if (backend == "OpenAI-compatible (Groq, OpenRouter...)") {
-            startOpenAI(job);
+
+        // Language-model backends draw vector shapes directly.
+        if (backend == "Gemini (free key)") return startShapes(job, "gemini", "Gemini");
+        if (backend == "OpenAI-compatible (Groq, OpenRouter...)") return startShapes(job, "openai", "The AI");
+
+        // Image backends: 2. Plan (optional), then 3. Drawing.
+        auto draw = [job, backend]() {
+            if (backend == "Pollinations (limited, image)") startPollinations(job);
+            else startCloudflare(job);
+        };
+
+        std::string planner = plannerLLM();
+        if (getB("art-plan") && !planner.empty()) {
+            notify("Planning the drawing...");
+            askLLM(s_planTask, planner, planInstruction(*job), false, [job, draw](bool ok, std::string text) {
+                text = trim(text);
+                if (ok && !text.empty() && text.size() < 1200) job->prompt = text;
+                draw(); // if planning fails we simply use the original prompt
+            });
         } else {
-            startPollinations(job);
+            draw();
         }
     }
 
@@ -705,14 +916,14 @@ namespace {
         TextInput* m_input = nullptr;
 
         bool init(Ref<EditorUI> ui) {
-            if (!Popup::init(330.f, 175.f)) return false;
+            if (!Popup::init(340.f, 175.f)) return false;
             this->setTitle("Art Agent");
 
-            m_input = TextInput::create(280.f, "Describe the art (any language)");
+            m_input = TextInput::create(290.f, "e.g. old cracked stone wall with a torch");
             m_input->setMaxCharCount(200);
             m_mainLayer->addChildAtPosition(m_input, Anchor::Center, ccp(0, 15));
 
-            auto hint = CCLabelBMFont::create("Paints the blocks you have selected", "chatFont.fnt");
+            auto hint = CCLabelBMFont::create("Draws inside the shape of your selection", "chatFont.fnt");
             hint->setScale(.7f);
             hint->setOpacity(160);
             m_mainLayer->addChildAtPosition(hint, Anchor::Center, ccp(0, -18));
@@ -745,7 +956,7 @@ namespace {
 void artOpenPopup(EditorUI* ui) {
     auto sel = ui->getSelectedObjects();
     if (!sel || sel->count() == 0) {
-        notify("Select the blocks you want to paint first", NotificationIcon::Warning);
+        notify("Select the blocks you want to decorate first", NotificationIcon::Warning);
         return;
     }
     if (auto popup = ArtPopup::create(ui)) popup->show();

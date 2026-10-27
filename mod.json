@@ -4,7 +4,7 @@
 		"win": "2.2081",
 		"android": "2.2081"
 	},
-	"version": "v0.3.0",
+	"version": "v0.4.0",
 	"id": "spreen20042.editortools",
 	"name": "Editor Tools",
 	"developer": "Spreen20042",
@@ -30,7 +30,7 @@
 			"type": "int",
 			"name": "Max Objects Per Action",
 			"description": "Safety limit: a single stroke, polygon or fill will never create more objects than this.",
-			"default": 4000,
+			"default": 6000,
 			"min": 50,
 			"max": 20000
 		},
@@ -131,13 +131,32 @@
 		"art-backend": {
 			"type": "string",
 			"name": "Art AI: Service",
-			"description": "Gemini = Google's free tier (best for drawing). OpenAI-compatible = Groq, OpenRouter, Cerebras, Mistral... (set URL/key/model below). Pollinations = image generator, very limited now.",
-			"default": "Gemini (free key)",
+			"description": "Cloudflare FLUX = best free image generator (needs a free Cloudflare account). Gemini / OpenAI-compatible (Groq, OpenRouter...) = a language model draws vector shapes. Pollinations = very limited now.",
+			"default": "Cloudflare FLUX (free image)",
 			"one-of": [
+				"Cloudflare FLUX (free image)",
 				"Gemini (free key)",
 				"OpenAI-compatible (Groq, OpenRouter...)",
 				"Pollinations (limited, image)"
 			]
+		},
+		"art-cf-account": {
+			"type": "string",
+			"name": "Art AI: Cloudflare Account ID",
+			"description": "Cloudflare dashboard > AI > Workers AI > Use REST API > Get Account ID. Free, no card.",
+			"default": ""
+		},
+		"art-cf-token": {
+			"type": "string",
+			"name": "Art AI: Cloudflare API Token",
+			"description": "Same page: Create a Workers AI API Token. About 100-170 free images per day. Stays on your computer.",
+			"default": ""
+		},
+		"art-plan": {
+			"type": "bool",
+			"name": "Art AI: Plan Prompt With AI",
+			"description": "Before drawing, a language model reads your selection's shape and writes a detailed brief (needs a Gemini or OpenAI-compatible key). Better results.",
+			"default": true
 		},
 		"art-gemini-key": {
 			"type": "string",
@@ -172,19 +191,19 @@
 		"art-mode": {
 			"type": "string",
 			"name": "Art AI: Mode",
-			"description": "Shapes as real blocks = the AI's drawing becomes stretched blocks (crisp, few objects; needs Gemini or OpenAI-compatible). Recolor = selected blocks get colors. New blocks = pixel grid of small blocks.",
-			"default": "Shapes as real blocks",
+			"description": "Smart blocks = the picture is traced into merged blocks inside your selection's shape (best). Shapes as real blocks = the model's vector shapes (Gemini/OpenAI only). Recolor = selected blocks just get colors.",
+			"default": "Smart blocks (merged)",
 			"one-of": [
+				"Smart blocks (merged)",
 				"Shapes as real blocks",
-				"Recolor selected blocks",
-				"Draw new blocks in area"
+				"Recolor selected blocks"
 			]
 		},
 		"art-colors": {
 			"type": "int",
 			"name": "Art AI: Number of Colors",
 			"description": "How many color channels the art uses (each one is a real color channel in your level).",
-			"default": 6,
+			"default": 8,
 			"min": 2,
 			"max": 12,
 			"control": {
@@ -202,9 +221,23 @@
 		"art-cell": {
 			"type": "float",
 			"name": "Art AI: Cell Size",
-			"description": "Resolution of the art in editor units (30 = one block). Smaller = more detail but more blocks in 'new blocks' mode.",
-			"default": 15.0,
+			"description": "Detail of the art in editor units (30 = one block). Smaller = more detail but more blocks.",
+			"default": 7.5,
 			"min": 3.75,
+			"max": 30.0
+		},
+		"art-clip": {
+			"type": "bool",
+			"name": "Art AI: Stay Inside Selection Shape",
+			"description": "On = the art only covers the blocks you selected. Off = it fills the whole rectangle around them.",
+			"default": true
+		},
+		"art-overhang": {
+			"type": "float",
+			"name": "Art AI: Overhang",
+			"description": "How far the art may extend past the edges of the selection (editor units). Useful for grass or snow on top.",
+			"default": 0.0,
+			"min": 0.0,
 			"max": 30.0
 		},
 		"screenshot-key": {
