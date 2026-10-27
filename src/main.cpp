@@ -4,6 +4,8 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 
+#include "art.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -152,11 +154,18 @@ class $modify(ETEditorUI, EditorUI) {
         shotBtn->setPosition(ccp(x, y - step * 3));
         f->menu->addChild(shotBtn);
 
+        auto artSpr = ButtonSprite::create("Art AI", 62, true, "bigFont.fnt", "GJ_button_04.png", 22.f, .5f);
+        auto artBtn = CCMenuItemExt::createSpriteExtra(artSpr, [this](CCMenuItemSpriteExtra*) {
+            artOpenPopup(this);
+        });
+        artBtn->setPosition(ccp(x, y - step * 4));
+        f->menu->addChild(artBtn);
+
         auto doneSpr = ButtonSprite::create("Done", 62, true, "bigFont.fnt", "GJ_button_01.png", 22.f, .5f);
         f->doneBtn = CCMenuItemExt::createSpriteExtra(doneSpr, [this](CCMenuItemSpriteExtra*) {
             this->etFinishPolygon();
         });
-        f->doneBtn->setPosition(ccp(x, y - step * 4));
+        f->doneBtn->setPosition(ccp(x, y - step * 5));
         f->doneBtn->setVisible(false);
         f->menu->addChild(f->doneBtn);
 

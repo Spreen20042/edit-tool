@@ -10,6 +10,19 @@ button column inside the editor (position adjustable in the mod settings):
 | Lasso   | Draw a closed outline with your finger/mouse; the inside is filled with blocks. |
 | Shot    | Saves a PNG of the level **without the editor UI** (desktop key: F2, configurable). |
 
+| Art AI  | **Free AI Art Agent.** Select blocks, press it, describe the art in any language. The selection gets painted with the generated art, using real color channels (default 900+). |
+
+### Art AI (free)
+
+No payments and no server of ours: it talks to free third-party services directly from your game.
+
+- **Pollinations (default):** no account, no key. Generates an image that is sampled onto your blocks.
+- **Gemini:** paste a free API key from <https://aistudio.google.com> in the mod settings. The AI describes the art as simple shapes, which are painted locally.
+- **Mode:** *Recolor selected blocks* (default) or *Draw new blocks in area* (finer detail).
+
+Free services have limits and can change or go down; if one stops working, switch backend in the settings.
+The prompt you type is sent to the chosen service.
+
 Tap a tool again to turn it off. If nothing is selected, tools use the basic block (ID 1).
 Every action is registered in the editor's undo list. All numbers (radius, thickness, fill size,
 object limit, ...) are in the mod settings.
