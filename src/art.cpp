@@ -38,7 +38,8 @@ namespace {
     std::string getS(char const* key) { return Mod::get()->getSettingValue<std::string>(key); }
 
     void notify(std::string const& text, NotificationIcon icon = NotificationIcon::Info) {
-        Notification::create(text, icon, 2.5f)->show();
+        float seconds = icon == NotificationIcon::Error ? 8.f : 2.5f;
+        Notification::create(text, icon, seconds)->show();
     }
 
     // ---- data -------------------------------------------------------------------------------
@@ -509,6 +510,13 @@ namespace {
             why += " (check the URL, account ID and model name)";
         } else if (res.code() == 429) {
             why += " (free quota reached, try later or switch service)";
+        }
+        // Include what the server said: it usually names the exact problem.
+        std::string body = res.string().unwrapOr("");
+        if (!body.empty()) {
+            log::error("Art Agent: server answered {}: {}", res.code(), body);
+            if (body.size() > 220) body.resize(220);
+            why += " | " + body;
         }
         return why;
     }
