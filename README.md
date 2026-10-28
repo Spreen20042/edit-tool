@@ -27,7 +27,8 @@ Works like a professional art agent, with free services only:
 The new blocks stay selected after drawing: press Delete to remove the whole drawing in one go.
 Build the structure from **filled blocks** (not thin lines) for the best result.
 
-You need a free account/key (no credit card). Set it up once in the mod settings:
+You need a free account/key (no credit card). Set it up once with the **Keys** button inside the Art AI window
+(it accepts every character; the game's own settings box drops the `_` in keys like `cfut_...`):
 
 | Service | What it does | Where |
 |---------|--------------|-------|

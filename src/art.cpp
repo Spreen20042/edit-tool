@@ -119,6 +119,19 @@ namespace {
         return s;
     }
 
+    // Cleans a pasted key: removes spaces, quotes and line breaks. The game's settings text box
+    // drops the "_" character, so known prefixes are repaired ("cfut..." -> "cfut_...").
+    std::string cleanKey(std::string k) {
+        std::string out;
+        for (unsigned char c : k) {
+            if (std::isspace(c) || c == '"' || c == '\'') continue;
+            out += static_cast<char>(c);
+        }
+        if (out.size() > 5 && out.rfind("cfut", 0) == 0 && out[4] != '_') out.insert(4, "_");
+        if (out.size() > 4 && out.rfind("gsk", 0) == 0 && out[3] != '_') out.insert(3, "_");
+        return out;
+    }
+
     bool parseHex(std::string const& s, ccColor3B& out) {
         std::string h = s;
         if (!h.empty() && h[0] == '#') h.erase(0, 1);
@@ -615,12 +628,12 @@ namespace {
     void askLLM(geode::async::TaskHolder<web::WebResponse>& holder, std::string const& which,
                 std::string const& instruction, bool wantJson, LLMCb cb) {
         web::WebRequest req;
-        req.userAgent("GeodeEditorTools/0.5");
+        req.userAgent("GeodeEditorTools/0.6");
         req.timeout(std::chrono::seconds(120));
         req.header("Content-Type", "application/json");
 
         if (which == "gemini") {
-            std::string key = getS("art-gemini-key");
+            std::string key = cleanKey(getS("art-gemini-key"));
             if (key.empty()) return cb(false, "paste your free Gemini API key in the mod settings");
             std::string model = getS("art-gemini-model");
             if (model.empty()) model = "gemini-2.5-flash";
@@ -651,7 +664,7 @@ namespace {
 
         // OpenAI-compatible: Groq, OpenRouter, Cerebras, Mistral, Together, ...
         std::string base = getS("art-openai-url");
-        std::string key = getS("art-openai-key");
+        std::string key = cleanKey(getS("art-openai-key"));
         std::string model = getS("art-openai-model");
         while (!base.empty() && base.back() == '/') base.pop_back();
         if (base.empty() || model.empty()) {
@@ -680,8 +693,8 @@ namespace {
         std::string backend = getS("art-backend");
         if (backend == "Gemini (free key)") return "gemini";
         if (backend == "OpenAI-compatible (Groq, OpenRouter...)") return "openai";
-        if (!getS("art-gemini-key").empty()) return "gemini";
-        if (!getS("art-openai-key").empty()) return "openai";
+        if (!cleanKey(getS("art-gemini-key")).empty()) return "gemini";
+        if (!cleanKey(getS("art-openai-key")).empty()) return "openai";
         return "";
     }
 
@@ -890,15 +903,15 @@ namespace {
     }
 
     void startCloudflare(std::shared_ptr<Job> job) {
-        std::string account = trim(getS("art-cf-account"));
-        std::string token = trim(getS("art-cf-token"));
+        std::string account = cleanKey(getS("art-cf-account"));
+        std::string token = cleanKey(getS("art-cf-token"));
         if (account.empty() || token.empty()) {
             return finish(job, false, "paste your Cloudflare Account ID and API token in the mod settings");
         }
 
         notify("Drawing...");
         web::WebRequest req;
-        req.userAgent("GeodeEditorTools/0.5");
+        req.userAgent("GeodeEditorTools/0.6");
         req.timeout(std::chrono::seconds(120));
         req.header("Authorization", "Bearer " + token);
         req.header("Content-Type", "application/json");
@@ -919,7 +932,7 @@ namespace {
                 if (res.code() == 401 || res.code() == 403) {
                     // Ask Cloudflare separately whether the token itself is valid and active.
                     web::WebRequest check;
-                    check.userAgent("GeodeEditorTools/0.5");
+                    check.userAgent("GeodeEditorTools/0.6");
                     check.timeout(std::chrono::seconds(30));
                     check.header("Authorization", "Bearer " + token);
                     s_planTask.spawn(
@@ -974,7 +987,7 @@ namespace {
             urlEncode(imagePrompt(*job)), w, h, static_cast<int>(std::time(nullptr) % 100000)
         );
         s_task.spawn(
-            web::WebRequest().userAgent("GeodeEditorTools/0.5").timeout(std::chrono::seconds(120)).get(url),
+            web::WebRequest().userAgent("GeodeEditorTools/0.6").timeout(std::chrono::seconds(120)).get(url),
             [job](web::WebResponse res) {
                 if (!res.ok()) return finish(job, false, httpWhy(res, "connection (Pollinations now limits free use)"));
                 auto const& data = res.data();
@@ -1058,6 +1071,62 @@ namespace {
 
     // ---- popup ------------------------------------------------------------------------------
 
+    // A small screen to paste keys. It uses a font that accepts every character (the settings
+    // text box of the game drops "_"), and saves into the same mod settings.
+    class KeysPopup : public Popup {
+    protected:
+        std::vector<std::pair<char const*, TextInput*>> m_fields;
+
+        bool init() {
+            if (!Popup::init(380.f, 280.f)) return false;
+            this->setTitle("Art AI keys");
+
+            struct Row { char const* label; char const* key; };
+            Row rows[] = {
+                {"Cloudflare Account ID", "art-cf-account"},
+                {"Cloudflare API Token", "art-cf-token"},
+                {"Groq / service API key", "art-openai-key"},
+                {"Gemini API key", "art-gemini-key"},
+            };
+            float y = 70.f;
+            for (auto const& r : rows) {
+                auto lbl = CCLabelBMFont::create(r.label, "goldFont.fnt");
+                lbl->setScale(.4f);
+                m_mainLayer->addChildAtPosition(lbl, Anchor::Center, ccp(0, y + 20.f));
+
+                auto in = TextInput::create(330.f, r.label, "chatFont.fnt");
+                in->setMaxCharCount(300);
+                in->setString(getS(r.key));
+                m_mainLayer->addChildAtPosition(in, Anchor::Center, ccp(0, y));
+                m_fields.push_back({r.key, in});
+                y -= 48.f;
+            }
+
+            auto spr = ButtonSprite::create("Save", 80, true, "bigFont.fnt", "GJ_button_01.png", 30.f, .7f);
+            auto btn = CCMenuItemExt::createSpriteExtra(spr, [this](CCMenuItemSpriteExtra*) {
+                for (auto const& f : m_fields) {
+                    std::string v = cleanKey(static_cast<std::string>(f.second->getString()));
+                    Mod::get()->setSettingValue<std::string>(f.first, v);
+                }
+                notify("Keys saved", NotificationIcon::Success);
+                this->onClose(nullptr);
+            });
+            m_buttonMenu->addChildAtPosition(btn, Anchor::Bottom, ccp(0, 24));
+            return true;
+        }
+
+    public:
+        static KeysPopup* create() {
+            auto ret = new KeysPopup();
+            if (ret->init()) {
+                ret->autorelease();
+                return ret;
+            }
+            delete ret;
+            return nullptr;
+        }
+    };
+
     class ArtPopup : public Popup {
     protected:
         TextInput* m_input = nullptr;
@@ -1066,7 +1135,7 @@ namespace {
             if (!Popup::init(340.f, 175.f)) return false;
             this->setTitle("Art Agent");
 
-            m_input = TextInput::create(290.f, "e.g. medieval stone castle with a wooden door");
+            m_input = TextInput::create(290.f, "e.g. medieval stone castle with a wooden door", "chatFont.fnt");
             m_input->setMaxCharCount(200);
             m_mainLayer->addChildAtPosition(m_input, Anchor::Center, ccp(0, 15));
 
@@ -1084,6 +1153,12 @@ namespace {
                 startJob(editor, text);
             });
             m_buttonMenu->addChildAtPosition(btn, Anchor::Bottom, ccp(0, 35));
+
+            auto keysSpr = ButtonSprite::create("Keys", 60, true, "bigFont.fnt", "GJ_button_04.png", 24.f, .5f);
+            auto keysBtn = CCMenuItemExt::createSpriteExtra(keysSpr, [](CCMenuItemSpriteExtra*) {
+                if (auto popup = KeysPopup::create()) popup->show();
+            });
+            m_buttonMenu->addChildAtPosition(keysBtn, Anchor::Bottom, ccp(125, 35));
             return true;
         }
 
