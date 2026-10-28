@@ -552,7 +552,9 @@ namespace {
     void finish(std::shared_ptr<Job> job, bool ok, std::string const& error = "") {
         s_busy = false;
         if (!ok) {
-            notify("Art Agent failed: " + error, NotificationIcon::Error);
+            // A popup wraps long text; a toast is cut off at the screen edges.
+            log::error("Art Agent failed: {}", error);
+            FLAlertLayer::create("Art Agent failed", error, "OK")->show();
             return;
         }
         applyCanvas(job);
@@ -905,8 +907,46 @@ namespace {
         std::string url = fmt::format(
             "https://api.cloudflare.com/client/v4/accounts/{}/ai/run/@cf/black-forest-labs/flux-1-schnell", account
         );
-        s_task.spawn(req.post(url), [job](web::WebResponse res) {
-            if (!res.ok()) return finish(job, false, httpWhy(res, "Cloudflare Account ID and API token"));
+        s_task.spawn(req.post(url), [job, token, account](web::WebResponse res) {
+            if (!res.ok()) {
+                std::string why = httpWhy(res, "Cloudflare Account ID and API token");
+                // What the mod actually sent (no secrets): helps spot a truncated or altered paste.
+                std::string info = fmt::format(
+                    " [token: {} chars, starts '{}', ends '{}'; account id: {} chars]",
+                    token.size(), token.substr(0, 5),
+                    token.size() > 3 ? token.substr(token.size() - 3) : std::string(), account.size()
+                );
+                if (res.code() == 401 || res.code() == 403) {
+                    // Ask Cloudflare separately whether the token itself is valid and active.
+                    web::WebRequest check;
+                    check.userAgent("GeodeEditorTools/0.5");
+                    check.timeout(std::chrono::seconds(30));
+                    check.header("Authorization", "Bearer " + token);
+                    s_planTask.spawn(
+                        check.get("https://api.cloudflare.com/client/v4/user/tokens/verify"),
+                        [job, why, info](web::WebResponse vr) {
+                            std::string status;
+                            if (vr.ok()) {
+                                std::string st;
+                                if (auto js = vr.json()) {
+                                    auto root = std::move(js).unwrap();
+                                    st = root["result"]["status"].asString().unwrapOr("");
+                                }
+                                status = st == "active"
+                                    ? " | Token check: ACTIVE, so the token is valid but lacks Workers AI permission "
+                                      "or belongs to another account"
+                                    : " | Token check: status '" + st + "'";
+                            } else {
+                                status = fmt::format(" | Token check: REJECTED ({}), the token is wrong, "
+                                                     "incomplete or was deleted", vr.code());
+                            }
+                            finish(job, false, why + status + info);
+                        }
+                    );
+                    return;
+                }
+                return finish(job, false, why + info);
+            }
             auto js = res.json();
             if (!js) return finish(job, false, "bad response from Cloudflare");
             auto root = std::move(js).unwrap();
