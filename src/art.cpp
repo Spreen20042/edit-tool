@@ -147,11 +147,14 @@ namespace {
         return inside;
     }
 
+    // Perceptual distance ("redmean"): much closer to how the eye sees skin, sky and stone tones
+    // than plain RGB distance.
     float colorDist2(ccColor3B a, ccColor3B b) {
+        float rmean = (float(a.r) + float(b.r)) * 0.5f;
         float dr = float(a.r) - float(b.r);
         float dg = float(a.g) - float(b.g);
         float db = float(a.b) - float(b.b);
-        return dr * dr + dg * dg + db * db;
+        return (2.f + rmean / 256.f) * dr * dr + 4.f * dg * dg + (2.f + (255.f - rmean) / 256.f) * db * db;
     }
 
     // k-means on colors. Returns, for every input color, the index of its palette entry.
@@ -267,41 +270,41 @@ namespace {
 
     // ---- placement mode 1: smart blocks (image trace) ---------------------------------------
 
-    void applySmart(std::shared_ptr<Job> job) {
-        int firstChannel = static_cast<int>(getI("art-first-channel"));
-        int maxColors = static_cast<int>(getI("art-colors"));
-        int maxObjects = static_cast<int>(getI("max-objects"));
-        bool clip = getB("art-clip");
-        int gw = job->gw, gh = job->gh;
-        float top = job->area.origin.y + job->area.size.height;
+    struct Rect { int i0, j0, i1, j1, color; };
 
-        // Cells that belong to the art, with their colors.
-        std::vector<int> cellToColor(static_cast<size_t>(gw) * gh, -1);
-        std::vector<ccColor3B> cols;
-        for (int j = 0; j < gh; ++j) {
-            for (int i = 0; i < gw; ++i) {
-                float x = job->area.origin.x + (i + 0.5f) * job->cellW;
-                float y = top - (j + 0.5f) * job->cellH;
-                if (clip && !insideSelection(*job, x, y)) continue;
-                cellToColor[static_cast<size_t>(j) * gw + i] = static_cast<int>(cols.size());
-                cols.push_back(job->canvas[static_cast<size_t>(j) * gw + i]);
+    // Removes speckle: every cell takes the most common color among its 3x3 neighbours.
+    // Fewer, bigger blocks with cleaner edges, at almost no loss of detail.
+    void majorityFilter(std::vector<int>& label, int gw, int gh, int colors, int passes) {
+        if (colors <= 0) return;
+        for (int pass = 0; pass < passes; ++pass) {
+            std::vector<int> out = label;
+            std::vector<int> counts(static_cast<size_t>(colors));
+            for (int j = 0; j < gh; ++j) {
+                for (int i = 0; i < gw; ++i) {
+                    int cur = label[static_cast<size_t>(j) * gw + i];
+                    if (cur < 0) continue;
+                    std::fill(counts.begin(), counts.end(), 0);
+                    for (int dj = -1; dj <= 1; ++dj) {
+                        for (int di = -1; di <= 1; ++di) {
+                            int ni = i + di, nj = j + dj;
+                            if (ni < 0 || nj < 0 || ni >= gw || nj >= gh) continue;
+                            int l = label[static_cast<size_t>(nj) * gw + ni];
+                            if (l >= 0 && l < colors) counts[static_cast<size_t>(l)]++;
+                        }
+                    }
+                    int best = cur;
+                    for (int c = 0; c < colors; ++c) {
+                        if (counts[static_cast<size_t>(c)] > counts[static_cast<size_t>(best)]) best = c;
+                    }
+                    out[static_cast<size_t>(j) * gw + i] = best;
+                }
             }
+            label = std::move(out);
         }
-        if (cols.empty()) {
-            notify("Nothing to paint inside the selection", NotificationIcon::Warning);
-            return;
-        }
+    }
 
-        std::vector<ccColor3B> palette;
-        auto assign = quantize(cols, maxColors, palette);
-
-        std::vector<int> label(static_cast<size_t>(gw) * gh, -1);
-        for (size_t c = 0; c < label.size(); ++c) {
-            if (cellToColor[c] >= 0) label[c] = assign[cellToColor[c]];
-        }
-
-        // Greedy rectangle merging: same-color neighbours become one big block.
-        struct Rect { int i0, j0, i1, j1, color; };
+    // Greedy rectangle merging: same-color neighbours become one big block.
+    std::vector<Rect> mergeRects(std::vector<int> const& label, int gw, int gh) {
         std::vector<Rect> rects;
         std::vector<char> used(label.size(), 0);
         for (int j = 0; j < gh; ++j) {
@@ -326,12 +329,65 @@ namespace {
                 rects.push_back({i, j, i1, j1, c});
             }
         }
+        return rects;
+    }
+
+    void applySmart(std::shared_ptr<Job> job) {
+        int firstChannel = static_cast<int>(getI("art-first-channel"));
+        int maxColors = static_cast<int>(getI("art-colors"));
+        int maxObjects = static_cast<int>(getI("max-objects"));
+        int smooth = static_cast<int>(getI("art-smooth"));
+        bool clip = getB("art-clip");
+        int gw = job->gw, gh = job->gh;
+        float top = job->area.origin.y + job->area.size.height;
+
+        // Cells that belong to the art, with their colors.
+        std::vector<int> cellToColor(static_cast<size_t>(gw) * gh, -1);
+        std::vector<ccColor3B> cols;
+        for (int j = 0; j < gh; ++j) {
+            for (int i = 0; i < gw; ++i) {
+                float x = job->area.origin.x + (i + 0.5f) * job->cellW;
+                float y = top - (j + 0.5f) * job->cellH;
+                if (clip && !insideSelection(*job, x, y)) continue;
+                cellToColor[static_cast<size_t>(j) * gw + i] = static_cast<int>(cols.size());
+                cols.push_back(job->canvas[static_cast<size_t>(j) * gw + i]);
+            }
+        }
+        if (cols.empty()) {
+            notify("Nothing to paint inside the selection", NotificationIcon::Warning);
+            return;
+        }
+
+        // Quantize and merge. If the result needs more blocks than your limit, the art is
+        // simplified automatically (more smoothing first, then fewer colors) until it fits.
+        std::vector<ccColor3B> palette;
+        std::vector<int> label;
+        std::vector<Rect> rects;
+        int colorsNow = maxColors;
+        int extraSmooth = 0;
+        bool simplified = false;
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            auto assign = quantize(cols, colorsNow, palette);
+            label.assign(static_cast<size_t>(gw) * gh, -1);
+            for (size_t c = 0; c < label.size(); ++c) {
+                if (cellToColor[c] >= 0) label[c] = assign[static_cast<size_t>(cellToColor[c])];
+            }
+            majorityFilter(label, gw, gh, static_cast<int>(palette.size()), smooth + extraSmooth);
+            rects = mergeRects(label, gw, gh);
+            if (static_cast<int>(rects.size()) <= maxObjects) break;
+            simplified = true;
+            if (extraSmooth < 3) extraSmooth++;
+            else colorsNow = std::max(3, colorsNow * 3 / 4);
+        }
 
         if (static_cast<int>(rects.size()) > maxObjects) {
-            notify(fmt::format("The art needs {} blocks (limit {}). Raise Art Cell Size or lower Art Colors.",
+            notify(fmt::format("The art needs {} blocks (limit {}). Raise the object limit or Art Cell Size.",
                                rects.size(), maxObjects),
                    NotificationIcon::Warning);
             return;
+        }
+        if (simplified) {
+            notify("Simplified the art to fit your block limit", NotificationIcon::Info);
         }
 
         for (size_t c = 0; c < palette.size(); ++c) {
@@ -529,7 +585,7 @@ namespace {
     void askLLM(geode::async::TaskHolder<web::WebResponse>& holder, std::string const& which,
                 std::string const& instruction, bool wantJson, LLMCb cb) {
         web::WebRequest req;
-        req.userAgent("GeodeEditorTools/0.4");
+        req.userAgent("GeodeEditorTools/0.5");
         req.timeout(std::chrono::seconds(120));
         req.header("Content-Type", "application/json");
 
@@ -599,18 +655,26 @@ namespace {
         return "";
     }
 
+    bool realisticStyle() { return getS("art-style") != "Flat (simple)"; }
+
     std::string planInstruction(Job const& job) {
+        std::string style = realisticStyle()
+            ? "Realistic, highly detailed game art: describe the materials (stone, wood, metal, brick, moss, glass), "
+              "textures, cracks and wear, windows and doors if it is a building, a clear light source from the top left "
+              "with highlights and cast shadows, and depth. Front elevation view, orthographic, no perspective, "
+              "plain dark background. "
+            : "Flat vector style, bold shapes, high contrast, plain simple background. ";
         return fmt::format(
             "You write prompts for an image generator. The image will decorate a video game structure "
             "with the silhouette below ('#' = solid, '.' = empty), aspect ratio about {:.1f}:1 (wide:tall).\n"
             "{}\n"
             "User request: \"{}\"\n"
-            "Write ONE detailed prompt in English, max 70 words, for a decorative game-art illustration "
-            "that fills the whole picture: materials, a limited palette of {} colors, lighting and small details. "
-            "Flat vector style, bold shapes, high contrast, plain simple background, no text, no frame. "
+            "Write ONE detailed prompt in English, max 80 words, for a decorative game-art illustration "
+            "that fills the whole picture, using about {} distinct colors. {}"
+            "No text, no frame, no watermark. "
             "Reply with only the prompt.",
             job.area.size.width / std::max(1.f, job.area.size.height), silhouette(job), job.prompt,
-            getI("art-colors")
+            getI("art-colors"), style
         );
     }
 
@@ -783,6 +847,13 @@ namespace {
     }
 
     std::string imagePrompt(Job const& job) {
+        if (realisticStyle()) {
+            return job.prompt +
+                ", highly detailed realistic game art, realistic textures and materials, soft shading, "
+                "consistent lighting from the top left with highlights and shadows, front elevation view, "
+                "orthographic, centered, rich but limited color palette, plain dark background, "
+                "no text, no frame, no watermark";
+        }
         return job.prompt +
             ", flat vector illustration, bold simple shapes, limited color palette, strong silhouette, "
             "high contrast, decorative game art, plain simple background, no text, no frame";
@@ -797,7 +868,7 @@ namespace {
 
         notify("Drawing...");
         web::WebRequest req;
-        req.userAgent("GeodeEditorTools/0.4");
+        req.userAgent("GeodeEditorTools/0.5");
         req.timeout(std::chrono::seconds(120));
         req.header("Authorization", "Bearer " + token);
         req.header("Content-Type", "application/json");
@@ -835,7 +906,7 @@ namespace {
             urlEncode(imagePrompt(*job)), w, h, static_cast<int>(std::time(nullptr) % 100000)
         );
         s_task.spawn(
-            web::WebRequest().userAgent("GeodeEditorTools/0.4").timeout(std::chrono::seconds(120)).get(url),
+            web::WebRequest().userAgent("GeodeEditorTools/0.5").timeout(std::chrono::seconds(120)).get(url),
             [job](web::WebResponse res) {
                 if (!res.ok()) return finish(job, false, httpWhy(res, "connection (Pollinations now limits free use)"));
                 auto const& data = res.data();
@@ -927,11 +998,11 @@ namespace {
             if (!Popup::init(340.f, 175.f)) return false;
             this->setTitle("Art Agent");
 
-            m_input = TextInput::create(290.f, "e.g. old cracked stone wall with a torch");
+            m_input = TextInput::create(290.f, "e.g. medieval stone castle with a wooden door");
             m_input->setMaxCharCount(200);
             m_mainLayer->addChildAtPosition(m_input, Anchor::Center, ccp(0, 15));
 
-            auto hint = CCLabelBMFont::create("Draws inside the shape of your selection", "chatFont.fnt");
+            auto hint = CCLabelBMFont::create("Describe materials and details (stone, wood, windows...)", "chatFont.fnt");
             hint->setScale(.7f);
             hint->setOpacity(160);
             m_mainLayer->addChildAtPosition(hint, Anchor::Center, ccp(0, -18));

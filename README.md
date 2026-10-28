@@ -37,6 +37,12 @@ You need a free account/key (no credit card). Set it up once in the mod settings
 
 Tip: put a Cloudflare token (drawing) **and** a Gemini or Groq key (planning) for the best results.
 
+**Realistic buildings:** the default style is *Realistic (detailed)*: the prompt asks for materials, textures,
+light from the top left, shadows and a front view, which is what makes walls, towers and houses look built.
+Describe materials and details ("mossy stone castle wall, wooden door, iron torches"). Use 12-20 colors
+and a small *Cell Size* (4-8) for more detail. *Cleanup* merges speckle into bigger blocks, and if the art needs
+more blocks than your limit it is simplified automatically to fit. Switch to *Flat (simple)* for cartoon look.
+
 **Modes:** *Smart blocks (merged)* is the default and the best. *Shapes as real blocks* uses vector shapes drawn by Gemini/Groq.
 *Recolor selected blocks* only changes colors. Settings let you pick detail (cell size), number of colors, block limit and overhang.
 Free services have limits and can change; your prompt is sent to the service you choose.

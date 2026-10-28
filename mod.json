@@ -4,7 +4,7 @@
 		"win": "2.2081",
 		"android": "2.2081"
 	},
-	"version": "v0.4.1",
+	"version": "v0.5.0",
 	"id": "spreen20042.editortools",
 	"name": "Editor Tools",
 	"developer": "Spreen20042",
@@ -29,10 +29,10 @@
 		"max-objects": {
 			"type": "int",
 			"name": "Max Objects Per Action",
-			"description": "Safety limit: a single stroke, polygon or fill will never create more objects than this.",
-			"default": 6000,
+			"description": "Safety limit: a single action never creates more objects than this. The Art Agent simplifies itself automatically to fit.",
+			"default": 8000,
 			"min": 50,
-			"max": 20000
+			"max": 30000
 		},
 		"scatter-radius": {
 			"type": "float",
@@ -158,6 +158,16 @@
 			"description": "Before drawing, a language model reads your selection's shape and writes a detailed brief (needs a Gemini or OpenAI-compatible key). Better results.",
 			"default": true
 		},
+		"art-style": {
+			"type": "string",
+			"name": "Art AI: Style",
+			"description": "Realistic = detailed materials, lighting and shadows, front view (best for buildings and walls). Flat = simple bold shapes.",
+			"default": "Realistic (detailed)",
+			"one-of": [
+				"Realistic (detailed)",
+				"Flat (simple)"
+			]
+		},
 		"art-gemini-key": {
 			"type": "string",
 			"name": "Art AI: Gemini API Key",
@@ -202,10 +212,10 @@
 		"art-colors": {
 			"type": "int",
 			"name": "Art AI: Number of Colors",
-			"description": "How many color channels the art uses (each one is a real color channel in your level).",
-			"default": 8,
+			"description": "How many color channels the art uses. More colors = more realistic shading but more blocks. Realistic art looks best with 12-20.",
+			"default": 12,
 			"min": 2,
-			"max": 12,
+			"max": 24,
 			"control": {
 				"slider": true
 			}
@@ -216,13 +226,13 @@
 			"description": "The art uses this channel and the next ones. Pick a range you are not using in your level (1-999).",
 			"default": 900,
 			"min": 1,
-			"max": 988
+			"max": 975
 		},
 		"art-cell": {
 			"type": "float",
 			"name": "Art AI: Cell Size",
 			"description": "Detail of the art in editor units (30 = one block). Smaller = more detail but more blocks.",
-			"default": 7.5,
+			"default": 6.0,
 			"min": 3.75,
 			"max": 30.0
 		},
@@ -239,6 +249,17 @@
 			"default": 0.0,
 			"min": 0.0,
 			"max": 30.0
+		},
+		"art-smooth": {
+			"type": "int",
+			"name": "Art AI: Cleanup",
+			"description": "Removes speckle so the art uses fewer, bigger blocks. 0 = off, 1 = light, 2 = medium, 3 = strong.",
+			"default": 1,
+			"min": 0,
+			"max": 3,
+			"control": {
+				"slider": true
+			}
 		},
 		"screenshot-key": {
 			"type": "string",
