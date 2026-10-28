@@ -1043,6 +1043,19 @@ namespace {
         job->cellW = job->area.size.width / job->gw;
         job->cellH = job->area.size.height / job->gh;
 
+        // A strip or a tiny structure has no room for a drawing: say so instead of silently making stripes.
+        float blocksW = job->area.size.width / kBlock;
+        float blocksH = job->area.size.height / kBlock;
+        if (blocksW < 6.f || blocksH < 4.f) {
+            notify(fmt::format("Your structure is only {:.0f}x{:.0f} blocks: too small to hold a drawing. "
+                               "Use at least 8x6 filled blocks.", blocksW, blocksH),
+                   NotificationIcon::Warning);
+        }
+        if (getS("art-mode") == "Recolor selected blocks") {
+            notify("Mode is 'Recolor selected blocks': it only changes colors. "
+                   "Set Art AI: Mode to 'Smart blocks (merged)'.", NotificationIcon::Warning);
+        }
+
         s_busy = true;
         std::string backend = getS("art-backend");
 
