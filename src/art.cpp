@@ -283,6 +283,18 @@ namespace {
 
     // ---- placement mode 1: smart blocks (image trace) ---------------------------------------
 
+    // Game blocks look duller than a picture: push saturation and contrast a little before quantizing.
+    ccColor3B punch(ccColor3B c, float sat, float contrast) {
+        float r = c.r, g = c.g, b = c.b;
+        float l = 0.299f * r + 0.587f * g + 0.114f * b;
+        auto fix = [&](float v) {
+            v = l + (v - l) * sat;
+            v = (v - 128.f) * contrast + 128.f;
+            return static_cast<GLubyte>(std::clamp(v, 0.f, 255.f));
+        };
+        return ccColor3B{fix(r), fix(g), fix(b)};
+    }
+
     struct Rect { int i0, j0, i1, j1, color; };
 
     // Removes speckle: every cell takes the most common color among its 3x3 neighbours.
@@ -363,7 +375,7 @@ namespace {
                 float y = top - (j + 0.5f) * job->cellH;
                 if (clip && !insideSelection(*job, x, y)) continue;
                 cellToColor[static_cast<size_t>(j) * gw + i] = static_cast<int>(cols.size());
-                cols.push_back(job->canvas[static_cast<size_t>(j) * gw + i]);
+                cols.push_back(punch(job->canvas[static_cast<size_t>(j) * gw + i], 1.3f, 1.12f));
             }
         }
         if (cols.empty()) {
@@ -704,9 +716,10 @@ namespace {
         std::string style = realisticStyle()
             ? "Realistic, highly detailed game art: describe the materials (stone, wood, metal, brick, moss, glass), "
               "textures, cracks and wear, windows and doors if it is a building, a clear light source from the top left "
-              "with highlights and cast shadows, and depth. Front elevation view, orthographic, no perspective, "
-              "plain dark background. "
-            : "Flat vector style, bold shapes, high contrast, plain simple background. ";
+              "with highlights and cast shadows, and depth. Front elevation view, orthographic, no perspective. "
+              "The picture fills the whole frame edge to edge with texture and detail, no empty background, "
+              "vivid saturated colors with strong contrast between light and dark areas. "
+            : "Flat vector style, bold shapes, vivid colors, high contrast, fills the whole frame edge to edge. ";
         return fmt::format(
             "You write prompts for an image generator. The image will decorate a video game structure "
             "with the silhouette below ('#' = solid, '.' = empty), aspect ratio about {:.1f}:1 (wide:tall).\n"
@@ -894,12 +907,12 @@ namespace {
             return job.prompt +
                 ", highly detailed realistic game art, realistic textures and materials, soft shading, "
                 "consistent lighting from the top left with highlights and shadows, front elevation view, "
-                "orthographic, centered, rich but limited color palette, plain dark background, "
-                "no text, no frame, no watermark";
+                "orthographic, full frame edge to edge with no empty background, rich vivid saturated colors, "
+                "strong contrast between light and dark areas, no text, no frame, no watermark";
         }
         return job.prompt +
             ", flat vector illustration, bold simple shapes, limited color palette, strong silhouette, "
-            "high contrast, decorative game art, plain simple background, no text, no frame";
+            "high contrast, vivid colors, decorative game art, full frame edge to edge, no text, no frame";
     }
 
     void startCloudflare(std::shared_ptr<Job> job) {
