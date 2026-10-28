@@ -571,8 +571,36 @@ namespace {
         std::string body = res.string().unwrapOr("");
         if (!body.empty()) {
             log::error("Art Agent: server answered {}: {}", res.code(), body);
-            if (body.size() > 220) body.resize(220);
-            why += " | " + body;
+
+            // Cloudflare: {"result":null,"success":false,"errors":[{"code":10000,"message":"..."}]}
+            // OpenAI-style: {"error":{"message":"..."}}
+            std::string detail;
+            if (auto parsed = matjson::parse(body)) {
+                auto js = std::move(parsed).unwrap();
+                if (js.isObject()) {
+                    if (js.contains("errors") && js["errors"].isArray()) {
+                        auto& errs = js["errors"];
+                        for (size_t i = 0; i < errs.size() && i < 2; ++i) {
+                            int64_t code = errs[i]["code"].asInt().unwrapOr(0);
+                            detail += fmt::format("{} (code {}) ", errs[i]["message"].asString().unwrapOr("?"), code);
+                            if (code == 10000) {
+                                detail += "-> the API token is wrong or lacks Workers AI permission. ";
+                            } else if (code == 7000 || code == 7003) {
+                                detail += "-> the Account ID is wrong. ";
+                            }
+                        }
+                    } else if (js.contains("error") && js["error"].isObject()) {
+                        detail = js["error"]["message"].asString().unwrapOr("");
+                    } else if (js.contains("error") && js["error"].isString()) {
+                        detail = js["error"].asString().unwrapOr("");
+                    }
+                }
+            }
+            if (detail.empty()) {
+                detail = body;
+                if (detail.size() > 220) detail.resize(220);
+            }
+            why += " | " + detail;
         }
         return why;
     }
